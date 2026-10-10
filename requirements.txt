@@ -1,0 +1,5 @@
+# Dependências propositalmente desatualizadas (com CVEs conhecidas)
+# para que o pip-audit (SCA) tenha o que detectar na primeira execução.
+Flask==2.2.2
+Werkzeug==2.2.2
+Jinja2==3.1.2

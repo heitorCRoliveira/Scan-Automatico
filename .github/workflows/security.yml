@@ -1,0 +1,164 @@
+name: Security Pipeline (DevSecOps)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------
+  # Testes automatizados (qualidade básica antes das análises)
+  # ---------------------------------------------------------------
+  tests:
+    name: Testes (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Instalar dependências
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Executar testes
+        run: pytest -q
+
+  # ---------------------------------------------------------------
+  # SAST - análise estática do código-fonte (Semgrep)
+  # ---------------------------------------------------------------
+  sast:
+    name: SAST - Semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Instalar Semgrep
+        run: pip install semgrep
+      - name: Executar Semgrep (falha se houver findings)
+        run: |
+          semgrep scan \
+            --config p/python \
+            --config p/security-audit \
+            --config p/owasp-top-ten \
+            --metrics=off \
+            --error \
+            --json-output=semgrep-report.json \
+            --text-output=semgrep-report.txt \
+            src/
+      - name: Publicar relatório
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: |
+            semgrep-report.json
+            semgrep-report.txt
+
+  # ---------------------------------------------------------------
+  # SCA - análise de dependências vulneráveis (pip-audit)
+  # ---------------------------------------------------------------
+  sca:
+    name: SCA - pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Instalar pip-audit
+        run: pip install pip-audit
+      - name: Executar pip-audit (falha se houver CVEs)
+        run: |
+          set -o pipefail
+          pip-audit -r requirements.txt --desc | tee pip-audit-report.txt
+      - name: Publicar relatório
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.txt
+
+  # ---------------------------------------------------------------
+  # DAST - análise dinâmica da aplicação em execução (OWASP ZAP)
+  # ---------------------------------------------------------------
+  dast:
+    name: DAST - OWASP ZAP
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+      - name: Subir a aplicação em background
+        run: |
+          nohup python src/app.py > app.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:5000/ > /dev/null && echo "App no ar" && exit 0
+            sleep 1
+          done
+          echo "A aplicação não subiu"; cat app.log; exit 1
+      - name: Executar ZAP Full Scan (ativo)
+        run: |
+          mkdir -p zap-out && chmod 777 zap-out
+          cp zap-rules.tsv zap-out/
+          set +e
+          docker run --rm --network host \
+            -v "$PWD/zap-out:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py -t http://localhost:5000 \
+              -c zap-rules.tsv \
+              -r zap-report.html -J zap-report.json -m 2
+          code=$?
+          set -e
+          echo "Código de saída do ZAP: $code (0=ok, 1=FAIL, 2=WARN, 3=erro)"
+          # Regras marcadas como FAIL em zap-rules.tsv derrubam o pipeline
+          if [ "$code" -eq 1 ] || [ "$code" -ge 3 ]; then exit 1; fi
+      - name: Publicar relatório
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: zap-out/
+
+  # ---------------------------------------------------------------
+  # Resultado consolidado: PASS / FAIL
+  # ---------------------------------------------------------------
+  resultado:
+    name: Resultado final (PASS / FAIL)
+    runs-on: ubuntu-latest
+    needs: [tests, sast, sca, dast]
+    if: always()
+    steps:
+      - name: Consolidar resultado
+        env:
+          TESTS: ${{ needs.tests.result }}
+          SAST: ${{ needs.sast.result }}
+          SCA: ${{ needs.sca.result }}
+          DAST: ${{ needs.dast.result }}
+        run: |
+          {
+            echo "## Resultado do pipeline de segurança"
+            echo ""
+            echo "| Etapa | Ferramenta | Resultado |"
+            echo "|---|---|---|"
+            echo "| Testes | pytest | $TESTS |"
+            echo "| SAST | Semgrep | $SAST |"
+            echo "| SCA | pip-audit | $SCA |"
+            echo "| DAST | OWASP ZAP | $DAST |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$TESTS" = "success" ] && [ "$SAST" = "success" ] && [ "$SCA" = "success" ] && [ "$DAST" = "success" ]; then
+            echo "PASS - nenhuma vulnerabilidade bloqueante encontrada."
+          else
+            echo "FAIL - há problemas de segurança (ou testes) a corrigir. Veja os jobs e artefatos."
+            exit 1
+          fi

@@ -1,0 +1,6 @@
+10020	FAIL	(Anti-clickjacking header ausente)
+10021	FAIL	(X-Content-Type-Options ausente)
+10038	FAIL	(Content-Security-Policy ausente)
+40012	FAIL	(Cross Site Scripting - Reflected)
+40018	FAIL	(SQL Injection)
+90020	FAIL	(Remote OS Command Injection)

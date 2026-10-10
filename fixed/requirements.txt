@@ -1,0 +1,4 @@
+# Versões atualizadas (ajuste conforme as "fix versions" indicadas pelo pip-audit)
+Flask>=3.1.2
+Werkzeug>=3.1.4
+Jinja2>=3.1.6
